@@ -1,0 +1,22 @@
+server:
+  port: 9090
+
+spring:
+  threads:
+    virtual:
+      enabled: true
+  application:
+    name: agentos-core
+  autoconfigure:
+    exclude: dev.langchain4j.openai.spring.AutoConfig
+
+# LangChain4j OpenAI configuration (MLX local endpoint)
+langchain4j:
+  open-ai:
+    chat-model:
+      base-url: http://127.0.0.1:8080/v1
+      api-key: not-needed
+      model-name: qwen/Qwen2-7B-Instruct
+      temperature: 0.7
+      log-requests: true
+      log-responses: true

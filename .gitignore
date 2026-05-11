@@ -1,0 +1,48 @@
+# Claude Code personal config
+.claude/
+
+# Java/Spring Boot
+target/
+!.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### IntelliJ IDEA ###
+.idea/
+*.iws
+*.iml
+*.ipr
+out/
+
+### Eclipse ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### Node/React ###
+node_modules/
+dist/
+build/
+.npm
+.eslintcache
+.stylelintcache
+
+### macOS ###
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+### Logs ###
+logs/
+*.log
+
+### Environment Variables ###
+.env
+.env.local
+.env.*.local
