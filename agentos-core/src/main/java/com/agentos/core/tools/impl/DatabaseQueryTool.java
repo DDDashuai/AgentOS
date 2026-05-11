@@ -8,9 +8,9 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
+import javax.sql.DataSource;
 import java.sql.*;
 import java.util.Map;
 
@@ -20,18 +20,11 @@ public class DatabaseQueryTool implements ExecutableTool {
     private static final Logger log = LoggerFactory.getLogger(DatabaseQueryTool.class);
 
     private final ObjectMapper objectMapper;
-    private final String dbUrl;
+    private final DataSource dataSource;
 
-    @Autowired
-    public DatabaseQueryTool(ObjectMapper objectMapper) {
+    public DatabaseQueryTool(ObjectMapper objectMapper, DataSource dataSource) {
         this.objectMapper = objectMapper;
-        this.dbUrl = "jdbc:sqlite:agentos_data.db";
-    }
-
-    /** Package-private for testing — allows injecting a custom database URL. */
-    DatabaseQueryTool(ObjectMapper objectMapper, String dbUrl) {
-        this.objectMapper = objectMapper;
-        this.dbUrl = dbUrl;
+        this.dataSource = dataSource;
     }
 
     @Override
@@ -63,7 +56,7 @@ public class DatabaseQueryTool implements ExecutableTool {
         }
 
         long start = System.currentTimeMillis();
-        try (Connection conn = DriverManager.getConnection(dbUrl);
+        try (Connection conn = dataSource.getConnection();
              Statement stmt = conn.createStatement();
              ResultSet rs = stmt.executeQuery(sql)) {
 

@@ -1,11 +1,12 @@
 package com.agentos.core.tools;
 
+import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import javax.sql.DataSource;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -14,7 +15,8 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Discovers database schema at startup by querying SQLite metadata.
+ * Discovers database schema at startup by querying PostgreSQL information_schema.
+ * Uses {@link PostConstruct} so discovery runs after Flyway migrations complete.
  * Injected into PromptOrchestrator so the LLM always knows the current schema.
  */
 @Component
@@ -22,9 +24,16 @@ public class DatabaseSchemaProvider {
 
     private static final Logger log = LoggerFactory.getLogger(DatabaseSchemaProvider.class);
 
-    private final String schemaDescription;
+    private final DataSource dataSource;
+    private String schemaDescription;
 
-    public DatabaseSchemaProvider() {
+    public DatabaseSchemaProvider(DataSource dataSource) {
+        this.dataSource = dataSource;
+        this.schemaDescription = "(Discovering schema...)";
+    }
+
+    @PostConstruct
+    public void init() {
         this.schemaDescription = discoverSchema();
     }
 
@@ -33,40 +42,42 @@ public class DatabaseSchemaProvider {
     }
 
     private String discoverSchema() {
-        String dbUrl = "jdbc:sqlite:agentos_data.db";
-        try (Connection conn = DriverManager.getConnection(dbUrl);
-             Statement stmt = conn.createStatement()) {
-
-            // Discover all tables
-            ResultSet tables = stmt.executeQuery(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
-            List<String> tableNames = new ArrayList<>();
-            while (tables.next()) {
-                tableNames.add(tables.getString("name"));
-            }
-            tables.close();
-
-            if (tableNames.isEmpty()) {
-                return "(No tables found in database)";
-            }
-
-            // Discover columns per table
+        try (Connection conn = dataSource.getConnection()) {
             Map<String, List<String[]>> schema = new LinkedHashMap<>();
-            for (String table : tableNames) {
-                List<String[]> columns = new ArrayList<>();
-                try (Statement colStmt = conn.createStatement();
-                     ResultSet cols = colStmt.executeQuery("PRAGMA table_info(\"" + table + "\")")) {
-                    while (cols.next()) {
-                        columns.add(new String[]{
-                            cols.getString("name"),
-                            cols.getString("type")
-                        });
-                    }
+
+            try (Statement stmt = conn.createStatement();
+                 ResultSet tables = stmt.executeQuery(
+                     "SELECT table_name FROM information_schema.tables " +
+                     "WHERE table_schema = 'public' AND table_type = 'BASE TABLE' " +
+                     "ORDER BY table_name")) {
+
+                List<String> tableNames = new ArrayList<>();
+                while (tables.next()) {
+                    tableNames.add(tables.getString("table_name"));
                 }
-                schema.put(table, columns);
+
+                if (tableNames.isEmpty()) {
+                    return "(No tables found in public schema)";
+                }
+
+                for (String table : tableNames) {
+                    List<String[]> columns = new ArrayList<>();
+                    try (Statement colStmt = conn.createStatement();
+                         ResultSet cols = colStmt.executeQuery(
+                             "SELECT column_name, data_type FROM information_schema.columns " +
+                             "WHERE table_schema = 'public' AND table_name = '" + table + "' " +
+                             "ORDER BY ordinal_position")) {
+                        while (cols.next()) {
+                            columns.add(new String[]{
+                                cols.getString("column_name"),
+                                cols.getString("data_type")
+                            });
+                        }
+                    }
+                    schema.put(table, columns);
+                }
             }
 
-            // Build description string
             StringBuilder sb = new StringBuilder();
             for (var entry : schema.entrySet()) {
                 sb.append("  Table: ").append(entry.getKey()).append("\n");
