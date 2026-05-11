@@ -10,7 +10,7 @@ fi
 
 # Start the MLX LM server with OpenAI-compatible API
 # Model can be overridden via the MODEL environment variable
-MODEL="${MODEL:-qwen/Qwen2-7B-Instruct}"
+MODEL="${MODEL:-Qwen/Qwen2.5-1.5B-Instruct}"
 PORT="${PORT:-8080}"
 
 python -m mlx_lm server \
