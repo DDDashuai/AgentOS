@@ -4,6 +4,7 @@ import com.agentos.core.security.HumanApprovalInterceptor;
 import com.agentos.core.security.PendingApprovalException;
 import com.agentos.core.security.ToolInterceptor;
 import com.agentos.core.security.ValidationInterceptor;
+import com.agentos.core.session.ApprovalService;
 import com.agentos.core.tool.ToolDefinition;
 import com.agentos.core.tool.ToolExecutionRequest;
 import com.agentos.core.tool.ToolExecutionResult;
@@ -202,7 +203,7 @@ class ConcurrencyPartitioningEngineTest {
         when(destructive.getName()).thenReturn("rm_tool");
         when(destructive.isDestructive()).thenReturn(true);
 
-        ToolInterceptor approval = new HumanApprovalInterceptor(List.of(destructive));
+        ToolInterceptor approval = new HumanApprovalInterceptor(List.of(destructive), new ApprovalService());
 
         assertThrows(PendingApprovalException.class,
                 () -> approval.preHandle(new ToolExecutionRequest("rm_tool", Map.of(), null)));
@@ -214,7 +215,7 @@ class ConcurrencyPartitioningEngineTest {
         when(safe.getName()).thenReturn("search_tool");
         when(safe.isDestructive()).thenReturn(false);
 
-        ToolInterceptor approval = new HumanApprovalInterceptor(List.of(safe));
+        ToolInterceptor approval = new HumanApprovalInterceptor(List.of(safe), new ApprovalService());
 
         assertDoesNotThrow(
                 () -> approval.preHandle(new ToolExecutionRequest("search_tool", Map.of(), null)));
@@ -238,7 +239,7 @@ class ConcurrencyPartitioningEngineTest {
     void engineWithHumanApprovalInterceptor_BlocksDestructiveTool() {
         var engineWithApproval = new ConcurrencyPartitioningEngine(
                 List.of(destructiveTool), Executors.newSingleThreadExecutor(),
-                List.of(new HumanApprovalInterceptor(List.of(destructiveTool))));
+                List.of(new HumanApprovalInterceptor(List.of(destructiveTool), new ApprovalService())));
 
         List<ToolExecutionResult> results = engineWithApproval.executePartitioned(List.of(
                 new ToolExecutionRequest("destructive_tool", Map.of(), "call_2")));

@@ -8,6 +8,7 @@ import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.ToolExecutionResultMessage;
 import dev.langchain4j.data.message.UserMessage;
+import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -107,8 +108,11 @@ public class PromptOrchestrator {
             }
         }
         sb.append("\n")
-                .append("When you need to use a tool, respond with a valid tool call.\n")
-                .append("When you have enough information, respond with your final answer.\n");
+                .append("IMPORTANT RULES:\n")
+                .append("1. When you call database_query, it returns a JSON result. Use the EXACT data from that result — do not invent or change values.\n")
+                .append("2. To chain tools: call database_query first, wait for the result, then call data_visualization with the actual data from the query result.\n")
+                .append("3. The 'data' parameter of data_visualization must be the RAW JSON array of rows from database_query — do not summarize, change, or fabricate data.\n")
+                .append("4. When you have enough information, respond with your final answer.\n");
         return sb.toString();
     }
 
@@ -116,11 +120,50 @@ public class PromptOrchestrator {
         return ToolSpecification.builder()
                 .name(tool.getName())
                 .description(buildToolDescription(tool))
+                .parameters(buildParameters(tool))
                 .build();
     }
 
+    /** Builds a JSON Schema describing the tool's expected arguments. */
+    private JsonObjectSchema buildParameters(ToolDefinition tool) {
+        JsonObjectSchema.Builder builder = JsonObjectSchema.builder();
+
+        switch (tool.getName()) {
+            case "database_query" -> {
+                builder.addStringProperty("query", "SQL SELECT query to execute on the database");
+                builder.required("query");
+            }
+            case "data_visualization" -> {
+                builder.addStringProperty("chartType", "Chart type: bar, line, pie, or scatter");
+                builder.addStringProperty("data", "JSON array of data objects, e.g. [{\"name\":\"Q1\",\"value\":100}]");
+                builder.required("chartType", "data");
+            }
+            case "file_export" -> {
+                builder.addStringProperty("data", "JSON array of data rows to export");
+                builder.addStringProperty("filename", "Output filename (e.g. report.csv)");
+                builder.required("data", "filename");
+            }
+            default -> {}
+        }
+
+        return builder.build();
+    }
+
     private String buildToolDescription(ToolDefinition tool) {
-        String desc = tool.getName() + " tool.";
+        String desc = switch (tool.getName()) {
+            case "database_query" ->
+                "Execute a SQL SELECT query on the SQLite database. Returns JSON rows.";
+            case "data_visualization" ->
+                "Generate an ECharts chart from REAL data. The 'data' parameter must be the ACTUAL JSON array returned by database_query — do not fabricate or modify values.";
+            case "file_export" ->
+                "Export data to a CSV file on the local filesystem. DESTRUCTIVE — requires human approval.";
+            case "bash_execution" ->
+                "Execute an arbitrary bash command. DESTRUCTIVE — requires human approval.";
+            case "local_search" ->
+                "Search local files and directories for content.";
+            default ->
+                tool.getName() + " tool.";
+        };
         if (!tool.isConcurrencySafe()) {
             desc += " Not concurrency-safe — executes in isolation.";
         }

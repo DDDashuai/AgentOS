@@ -33,6 +33,9 @@ public class AgentHarness {
 
     private static final Logger log = LoggerFactory.getLogger(AgentHarness.class);
 
+    /** Safety limit: break agent loop after this many iterations to prevent runaway loops. */
+    private static final int MAX_ITERATIONS = 10;
+
     private final ChatLanguageModel chatModel;
     private final ConcurrencyPartitioningEngine partitioningEngine;
     private final PromptOrchestrator promptOrchestrator;
@@ -56,9 +59,10 @@ public class AgentHarness {
     public Flux<AgentEvent> run(AgentState initialState, String userPrompt) {
         return Flux.create(emitter -> {
             AgentState state = initialState.appendMessage(ChatMessage.user(userPrompt));
+            int iteration = 0;
 
             loop:
-            while (true) {
+            while (iteration++ < MAX_ITERATIONS) {
                 // 1. Build messages and call LLM
                 emitter.next(new AgentEvent.ThinkingEvent("Sending to LLM..."));
                 List<dev.langchain4j.data.message.ChatMessage> messages =
@@ -80,7 +84,7 @@ public class AgentHarness {
                     for (var lc4jReq : lc4jRequests) {
                         Map<String, String> args = parseArgs(lc4jReq.arguments());
                         toolRequests.add(new ToolExecutionRequest(
-                                lc4jReq.name(), args, lc4jReq.id()));
+                                lc4jReq.name(), args, lc4jReq.id(), state.sessionId()));
                     }
 
                     // Execute via the partitioning engine (virtual-thread aware + security chain)
@@ -104,6 +108,12 @@ public class AgentHarness {
                     emitter.next(new AgentEvent.FinalResponseEvent(text));
                     break loop;
                 }
+            }
+
+            if (iteration >= MAX_ITERATIONS) {
+                log.warn("Agent loop exceeded max iterations ({}) for session {}", MAX_ITERATIONS, state.sessionId());
+                emitter.next(new AgentEvent.FinalResponseEvent(
+                        "I've reached the maximum number of steps. Please try a simpler request or rephrase."));
             }
 
             emitter.complete();
