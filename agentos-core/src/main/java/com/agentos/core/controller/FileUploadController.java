@@ -1,8 +1,10 @@
 package com.agentos.core.controller;
 
+import com.agentos.core.entity.ChatSessionEntity;
 import com.agentos.core.file.FileParserService;
 import com.agentos.core.file.FileStorageService;
 import com.agentos.core.file.UploadedFile;
+import com.agentos.core.repository.ChatSessionRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,12 +24,15 @@ public class FileUploadController {
 
     private final FileParserService fileParser;
     private final FileStorageService fileStorage;
+    private final ChatSessionRepository chatSessionRepository;
     private final long maxFileSize;
 
     public FileUploadController(FileParserService fileParser, FileStorageService fileStorage,
-                                 @Value("${agentos.upload.max-file-size:10485760}") long maxFileSize) {
+                                ChatSessionRepository chatSessionRepository,
+                                @Value("${agentos.upload.max-file-size:10485760}") long maxFileSize) {
         this.fileParser = fileParser;
         this.fileStorage = fileStorage;
+        this.chatSessionRepository = chatSessionRepository;
         this.maxFileSize = maxFileSize;
     }
 
@@ -62,9 +67,13 @@ public class FileUploadController {
             sessionId = UUID.randomUUID().toString();
         }
 
+        // Ensure a chat_session record exists for this sessionId (FK requirement)
+        ensureSession(sessionId);
+
         try {
-            UploadedFile parsed = fileParser.parse(originalName, file.getInputStream());
-            fileStorage.store(sessionId, parsed);
+            byte[] rawBytes = file.getBytes();
+            UploadedFile parsed = fileParser.parse(originalName, new java.io.ByteArrayInputStream(rawBytes));
+            fileStorage.store(sessionId, parsed, rawBytes);
 
             log.info("[{}] Uploaded file: {} ({} rows, {})",
                     sessionId, originalName, parsed.totalRowCount(), parsed.fileType());
@@ -101,5 +110,19 @@ public class FileUploadController {
                         "headers", f.headers()
                 )).collect(Collectors.toList())
         ));
+    }
+
+    private void ensureSession(String sessionId) {
+        UUID uuid = toSessionUuid(sessionId);
+        chatSessionRepository.findById(uuid).orElseGet(() ->
+                chatSessionRepository.save(new ChatSessionEntity(uuid, "File upload session")));
+    }
+
+    private static UUID toSessionUuid(String sessionId) {
+        try {
+            return UUID.fromString(sessionId);
+        } catch (IllegalArgumentException e) {
+            return UUID.nameUUIDFromBytes(sessionId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        }
     }
 }

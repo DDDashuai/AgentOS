@@ -1,6 +1,10 @@
 package com.agentos.core.controller;
 
+import com.agentos.core.entity.ChatMessageEntity;
+import com.agentos.core.entity.ChatSessionEntity;
 import com.agentos.core.harness.AgentHarness;
+import com.agentos.core.repository.ChatMessageRepository;
+import com.agentos.core.repository.ChatSessionRepository;
 import com.agentos.core.security.PendingApprovalException;
 import com.agentos.core.session.ApprovalService;
 import com.agentos.core.state.AgentEvent;
@@ -15,6 +19,7 @@ import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import reactor.core.publisher.Flux;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -29,23 +34,25 @@ public class ChatController {
     private final AgentHarness agentHarness;
     private final ApprovalService approvalService;
     private final ObjectMapper objectMapper;
+    private final ChatSessionRepository sessionRepository;
+    private final ChatMessageRepository messageRepository;
 
-    /** Lightweight in-memory session state store. */
+    /** Lightweight in-memory session state store (agent execution context). */
     private final Map<String, AgentState> sessions = new ConcurrentHashMap<>();
 
-    public ChatController(AgentHarness agentHarness, ApprovalService approvalService, ObjectMapper objectMapper) {
+    public ChatController(AgentHarness agentHarness, ApprovalService approvalService,
+                          ObjectMapper objectMapper,
+                          ChatSessionRepository sessionRepository,
+                          ChatMessageRepository messageRepository) {
         this.agentHarness = agentHarness;
         this.approvalService = approvalService;
         this.objectMapper = objectMapper;
+        this.sessionRepository = sessionRepository;
+        this.messageRepository = messageRepository;
     }
 
     /**
      * POST /api/chat — sends a message to the agent and streams back SSE events.
-     * <p>
-     * Events: {@code data: {"type":"thinking","thought":"..."}\n\n}
-     *         {@code data: {"type":"tool_execution","results":[...]}\n\n}
-     *         {@code data: {"type":"hitl_required","toolName":"...","message":"..."}\n\n}
-     *         {@code data: {"type":"final","response":"...","sessionId":"..."}\n\n}
      */
     @PostMapping(produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public Flux<String> chat(@RequestBody Map<String, String> body) {
@@ -55,21 +62,32 @@ public class ChatController {
         }
 
         String sessionId = body.getOrDefault("sessionId", UUID.randomUUID().toString());
+
+        // Ensure session exists in DB
+        UUID sessionUuid = toSessionUuid(sessionId);
+        sessionRepository.findById(sessionUuid).orElseGet(() -> {
+            var s = new ChatSessionEntity(sessionUuid, truncateTitle(message));
+            return sessionRepository.save(s);
+        });
+
+        // Persist user message
+        messageRepository.save(new ChatMessageEntity(
+                UUID.randomUUID(), sessionUuid, "user", message, null));
+
+        // Get or create agent execution state (loads previous messages from DB on restart)
         AgentState state = sessions.computeIfAbsent(sessionId,
-                id -> new AgentState(id, List.of(), Map.of()));
+                id -> buildAgentState(sessionId));
 
         log.info("[{}] Chat request: {}", sessionId, message);
 
+        final String finalSessionId = sessionId;
         return agentHarness.run(state, message)
-                .concatMap(event -> Flux.fromIterable(toSseEvents(event)))
-                .doFinally(sig -> log.debug("[{}] Stream complete: {}", sessionId, sig));
+                .concatMap(event -> Flux.fromIterable(toSseEvents(event, finalSessionId)))
+                .doFinally(sig -> log.debug("[{}] Stream complete: {}", finalSessionId, sig));
     }
 
     /**
      * POST /api/chat/approve — pre-approves a destructive tool for a session.
-     * <p>
-     * The client should then send a follow-up chat message to retry the
-     * approved tool.
      */
     @PostMapping("/approve")
     public Map<String, Object> approve(@RequestBody Map<String, String> body) {
@@ -90,13 +108,26 @@ public class ChatController {
     // Helpers
     // -----------------------------------------------------------------------
 
-    private List<String> toSseEvents(AgentEvent event) {
+    private AgentState buildAgentState(String sessionId) {
+        try {
+            UUID sessionUuid = toSessionUuid(sessionId);
+            var entities = messageRepository.findBySessionIdOrderByCreatedAtAsc(sessionUuid);
+            var history = entities.stream()
+                    .map(m -> new ChatMessage(m.getRole(), m.getContent(), m.getToolCallId()))
+                    .toList();
+            log.info("[{}] Restored {} messages from database", sessionId, history.size());
+            return new AgentState(sessionId, history, Map.of());
+        } catch (IllegalArgumentException e) {
+            return new AgentState(sessionId, List.of(), Map.of());
+        }
+    }
+
+    private List<String> toSseEvents(AgentEvent event, String sessionId) {
         return switch (event) {
             case AgentEvent.ThinkingEvent t ->
                     List.of(sse("thinking", Map.of("thought", t.thought())));
 
             case AgentEvent.ToolExecutionEvent e -> {
-                // Check if any tool result requires human approval
                 boolean hitlRequired = false;
                 String hitlTool = null;
                 for (ToolExecutionResult r : e.results()) {
@@ -117,32 +148,33 @@ public class ChatController {
             }
 
             case AgentEvent.FinalResponseEvent f -> {
-                String sessionId = findSessionId();
+                // Persist assistant response to DB
+                persistAssistantMessage(sessionId, f.response());
+
                 List<String> events = new java.util.ArrayList<>();
                 events.add(sse("final", Map.of(
                         "response", f.response(),
-                        "sessionId", sessionId != null ? sessionId : "")));
+                        "sessionId", sessionId)));
                 events.add(sse("[DONE]", Map.of()));
                 yield events;
             }
         };
     }
 
-    /**
-     * Reconstructs a sessionId from the current AgentState if possible.
-     * Since AgentEvent does not carry session context, we do a best-effort
-     * lookup from the last-used session key.
-     */
-    private String findSessionId() {
-        // Best-effort: use the last entry from sessions
-        return sessions.isEmpty() ? null : sessions.keySet().stream().reduce((a, b) -> b).orElse(null);
+    private void persistAssistantMessage(String sessionId, String content) {
+        try {
+            UUID sessionUuid = toSessionUuid(sessionId);
+            messageRepository.save(new ChatMessageEntity(
+                    UUID.randomUUID(), sessionUuid, "assistant", content, null));
+        } catch (IllegalArgumentException e) {
+            log.warn("Failed to persist assistant message: {}", e.getMessage());
+        }
     }
 
     private String sse(String type, Object data) {
         try {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("type", type);
-            // If data is a map, merge it
             if (data instanceof Map<?, ?> map) {
                 map.forEach((k, v) -> {
                     if (v instanceof String s) node.put((String) k, s);
@@ -153,11 +185,22 @@ public class ChatController {
             } else {
                 node.putPOJO("payload", data);
             }
-            // The tool_execution results field can be large — handle it via POJO
             return "data: " + objectMapper.writeValueAsString(node) + "\n\n";
         } catch (Exception e) {
             log.error("Failed to serialize SSE event", e);
             return "data: {\"type\":\"error\",\"message\":\"serialization failed\"}\n\n";
         }
+    }
+
+    private static UUID toSessionUuid(String sessionId) {
+        try {
+            return UUID.fromString(sessionId);
+        } catch (IllegalArgumentException e) {
+            return UUID.nameUUIDFromBytes(sessionId.getBytes(StandardCharsets.UTF_8));
+        }
+    }
+
+    private static String truncateTitle(String message) {
+        return message.length() > 100 ? message.substring(0, 100) + "..." : message;
     }
 }
