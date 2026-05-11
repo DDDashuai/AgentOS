@@ -37,13 +37,21 @@ agentos:
     max-preview-rows: 5
     max-rows-per-file: 5000
 
+  knowledge:
+    embedding-server-url: http://127.0.0.1:8081
+    chunk:
+      chunk-size: 512
+      chunk-overlap: 64
+      max-chunks-per-document: 1000
+
 # LangChain4j OpenAI configuration (MLX local endpoint)
 langchain4j:
   open-ai:
     chat-model:
       base-url: http://127.0.0.1:8080/v1
       api-key: not-needed
-      model-name: Qwen/Qwen2.5-1.5B-Instruct
+      model-name: mlx-community/Qwen2-7B-Instruct-4bit
       temperature: 0.7
       log-requests: true
       log-responses: true
+
