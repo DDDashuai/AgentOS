@@ -25,7 +25,7 @@ public class LangChain4jConfig {
                 .apiKey(apiKey)
                 .modelName(modelName)
                 .temperature(temperature)
-                .timeout(Duration.ofSeconds(60))
+                .timeout(Duration.ofSeconds(300))
                 .logRequests(true)
                 .logResponses(true)
                 .build();
