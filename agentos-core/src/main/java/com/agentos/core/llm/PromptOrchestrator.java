@@ -2,6 +2,7 @@ package com.agentos.core.llm;
 
 import com.agentos.core.state.AgentState;
 import com.agentos.core.state.ChatMessage;
+import com.agentos.core.tools.DatabaseSchemaProvider;
 import com.agentos.core.tool.ToolDefinition;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.AiMessage;
@@ -19,9 +20,10 @@ import java.util.List;
 /**
  * Cache-aware prompt orchestrator.
  * <p>
- * The system prompt is built once at startup (static, containing tool schemas)
- * and never changes. Dynamic user history is appended separately. This strict
- * separation maximizes API prompt caching hit rates on the MLX server.
+ * The system prompt is built once at startup (static, containing tool schemas
+ * and discovered database schema) and never changes. Dynamic user history is
+ * appended separately. This strict separation maximizes API prompt caching hit
+ * rates on the MLX server.
  */
 @Component
 public class PromptOrchestrator {
@@ -30,8 +32,10 @@ public class PromptOrchestrator {
 
     private final String systemPrompt;
     private final List<ToolSpecification> toolSpecifications;
+    private final String databaseSchema;
 
-    public PromptOrchestrator(List<ToolDefinition> tools) {
+    public PromptOrchestrator(List<ToolDefinition> tools, DatabaseSchemaProvider schemaProvider) {
+        this.databaseSchema = schemaProvider.getSchemaDescription();
         this.toolSpecifications = tools.stream()
                 .map(this::toToolSpecification)
                 .toList();
@@ -108,11 +112,15 @@ public class PromptOrchestrator {
             }
         }
         sb.append("\n")
+                .append("DATABASE SCHEMA:\n")
+                .append(databaseSchema).append("\n")
                 .append("IMPORTANT RULES:\n")
-                .append("1. When you call database_query, it returns a JSON result. Use the EXACT data from that result — do not invent or change values.\n")
-                .append("2. To chain tools: call database_query first, wait for the result, then call data_visualization with the actual data from the query result.\n")
-                .append("3. The 'data' parameter of data_visualization must be the RAW JSON array of rows from database_query — do not summarize, change, or fabricate data.\n")
-                .append("4. When you have enough information, respond with your final answer.\n");
+                .append("1. Always use the EXACT table and column names from DATABASE SCHEMA above.\n")
+                .append("2. When you call database_query, it returns a JSON result. Use the EXACT data from that result — do not invent or change values.\n")
+                .append("3. To chain tools: call database_query first, wait for the result, then call data_visualization with the actual data from the query result.\n")
+                .append("4. The 'data' parameter of data_visualization must be the RAW JSON array of rows from database_query — do not summarize, change, or fabricate data.\n")
+                .append("5. Always output valid JSON: use double quotes (\") not single quotes (') for JSON strings.\n")
+                .append("6. When you have enough information, respond with your final answer.\n");
         return sb.toString();
     }
 
@@ -152,9 +160,10 @@ public class PromptOrchestrator {
     private String buildToolDescription(ToolDefinition tool) {
         String desc = switch (tool.getName()) {
             case "database_query" ->
-                "Execute a SQL SELECT query on the SQLite database. Returns JSON rows.";
+                "Execute a SQL SELECT query on the SQLite database. Schema:\n" + databaseSchema
+                    + "Returns JSON rows.";
             case "data_visualization" ->
-                "Generate an ECharts chart from REAL data. The 'data' parameter must be the ACTUAL JSON array returned by database_query — do not fabricate or modify values.";
+                "Generate an ECharts chart from REAL data. The 'data' parameter must be the ACTUAL JSON array returned by database_query — do not fabricate or modify values. Use double quotes not single quotes.";
             case "file_export" ->
                 "Export data to a CSV file on the local filesystem. DESTRUCTIVE — requires human approval.";
             case "bash_execution" ->
