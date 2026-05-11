@@ -13,6 +13,6 @@ fi
 MODEL="${MODEL:-qwen/Qwen2-7B-Instruct}"
 PORT="${PORT:-8080}"
 
-python -m mlx_lm.server \
+python -m mlx_lm server \
     --model "$MODEL" \
     --port "$PORT"
