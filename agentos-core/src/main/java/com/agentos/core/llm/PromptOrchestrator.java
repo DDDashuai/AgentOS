@@ -1,21 +1,13 @@
 package com.agentos.core.llm;
 
-import com.agentos.core.state.AgentState;
-import com.agentos.core.state.ChatMessage;
-import com.agentos.core.file.FileStorageService;
 import com.agentos.core.tools.DatabaseSchemaProvider;
 import com.agentos.core.tool.ToolDefinition;
 import dev.langchain4j.agent.tool.ToolSpecification;
-import dev.langchain4j.data.message.AiMessage;
-import dev.langchain4j.data.message.SystemMessage;
-import dev.langchain4j.data.message.ToolExecutionResultMessage;
-import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
-import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -34,16 +26,13 @@ public class PromptOrchestrator {
     private final String systemPrompt;
     private final List<ToolSpecification> toolSpecifications;
     private final String databaseSchema;
-    private final FileStorageService fileStorageService;
 
-    public PromptOrchestrator(List<ToolDefinition> tools, DatabaseSchemaProvider schemaProvider,
-                              FileStorageService fileStorageService) {
+    public PromptOrchestrator(List<ToolDefinition> tools, DatabaseSchemaProvider schemaProvider) {
         this.databaseSchema = schemaProvider.getSchemaDescription();
-        this.fileStorageService = fileStorageService;
         this.toolSpecifications = tools.stream()
                 .map(this::toToolSpecification)
                 .toList();
-        this.systemPrompt = buildSystemPrompt(this.toolSpecifications);
+        this.systemPrompt = buildSystemPrompt(tools);
         log.info("Built system prompt ({} chars) for {} tools", systemPrompt.length(), tools.size());
     }
 
@@ -57,80 +46,35 @@ public class PromptOrchestrator {
         return toolSpecifications;
     }
 
-    /**
-     * Builds the full LangChain4j message list: [SystemMessage, ...history, ...userPrompt].
-     * The system message is always first and always byte-identical, giving the MLX
-     * server the best chance to serve the system prompt from its prefix cache.
-     * Tool result messages use the original tool call IDs from the LLM.
-     */
-    public List<dev.langchain4j.data.message.ChatMessage> buildMessages(
-            AgentState state, String userPrompt) {
-
-        List<dev.langchain4j.data.message.ChatMessage> messages = new ArrayList<>();
-
-        // 1. Static system prompt — cache anchor
-        messages.add(new SystemMessage(systemPrompt));
-
-        // 2. Conversation history (user ↔ assistant ↔ tool)
-        for (ChatMessage msg : state.history()) {
-            switch (msg.role()) {
-                case "user" -> messages.add(new UserMessage(msg.content()));
-                case "assistant" -> messages.add(new AiMessage(msg.content()));
-                case "tool" -> {
-                    int colonIdx = msg.content().indexOf(':');
-                    if (colonIdx > 0) {
-                        String toolName = msg.content().substring(0, colonIdx);
-                        String result = msg.content().substring(colonIdx + 1);
-                        String id = msg.toolCallId() != null ? msg.toolCallId() : "call_" + System.nanoTime();
-                        messages.add(new ToolExecutionResultMessage(id, toolName, result));
-                    } else {
-                        messages.add(new ToolExecutionResultMessage("call_0", "unknown", msg.content()));
-                    }
-                }
-                default -> log.warn("Unknown message role: {}", msg.role());
-            }
-        }
-
-        // 3. Uploaded file context — injected before the user prompt
-        String fileDesc = fileStorageService.buildDescription(state.sessionId());
-        String augmentedPrompt = fileDesc.isEmpty() ? userPrompt
-                : fileDesc + "\n[END OF UPLOADED FILE CONTEXT]\n---\n" + userPrompt;
-
-        // 4. Current user prompt (augmented with file context if any)
-        messages.add(new UserMessage(augmentedPrompt));
-
-        return messages;
-    }
-
     // -----------------------------------------------------------------------
     // Private helpers
     // -----------------------------------------------------------------------
 
-    private String buildSystemPrompt(List<ToolSpecification> specs) {
+    private String buildSystemPrompt(List<ToolDefinition> tools) {
         StringBuilder sb = new StringBuilder();
-        sb.append("You are AgentOS, an AI agent with access to the following tools:\n\n");
-        if (specs.isEmpty()) {
-            sb.append("(No tools available)\n");
-        } else {
-            for (ToolSpecification spec : specs) {
-                sb.append("- ").append(spec.name());
-                if (spec.description() != null && !spec.description().isBlank()) {
-                    sb.append(": ").append(spec.description());
-                }
-                sb.append("\n");
-            }
+        sb.append("You are AgentOS, an AI agent. You have access to tools you can call to help the user.\n\n");
+
+        sb.append("AVAILABLE TOOLS:\n");
+        for (ToolDefinition tool : tools) {
+            sb.append("- ").append(tool.getName()).append(": ");
+            sb.append(buildToolDescription(tool)).append("\n");
         }
-        sb.append("\n")
-                .append("DATABASE SCHEMA:\n")
+
+        sb.append("\nDATABASE SCHEMA:\n")
                 .append(databaseSchema).append("\n")
-                .append("IMPORTANT RULES:\n")
+                .append("\nHOW TO USE TOOLS:\n")
+                .append("When you need to use a tool, output a tool call on its own line in EXACTLY this format:\n")
+                .append("[TOOL_CALL] {\"name\": \"tool_name\", \"arguments\": {\"param1\": \"value1\"}} [/TOOL_CALL]\n\n")
+                .append("Example: To search the knowledge base, output:\n")
+                .append("[TOOL_CALL] {\"name\": \"search_knowledge\", \"arguments\": {\"query\": \"PostgreSQL tuning\"}} [/TOOL_CALL]\n\n")
+                .append("RULES:\n")
                 .append("1. Always use the EXACT table and column names from DATABASE SCHEMA above.\n")
                 .append("2. When you call database_query, it returns a JSON result. Use the EXACT data from that result — do not invent or change values.\n")
-                .append("3. To chain tools: call database_query first, wait for the result, then call data_visualization with the actual data from the query result.\n")
-                .append("4. The 'data' parameter of data_visualization must be the RAW JSON array of rows from database_query or query_uploaded_data — do not summarize, change, or fabricate data.\n")
-                .append("5. query_uploaded_data returns data in the same JSON format as database_query, and its output can also be passed to data_visualization.\n")
-                .append("6. Always output valid JSON: use double quotes (\") not single quotes (') for JSON strings.\n")
-                .append("7. When you have enough information, respond with your final answer.\n");
+                .append("3. To chain tools: call database_query or search_knowledge first, wait for the result, then call the next tool.\n")
+                .append("4. Only call ONE tool at a time. Wait for the result before calling another tool.\n")
+                .append("5. Always output valid JSON: use double quotes (\") not single quotes (') for JSON strings.\n")
+                .append("6. Before answering knowledge questions, always call search_knowledge first.\n")
+                .append("7. When you have enough information, provide your final answer (without any [TOOL_CALL]).\n");
         return sb.toString();
     }
 
@@ -161,6 +105,14 @@ public class PromptOrchestrator {
                 builder.addStringProperty("filename", "Output filename (e.g. report.csv)");
                 builder.required("data", "filename");
             }
+            case "bash_execution" -> {
+                builder.addStringProperty("command", "The bash command to execute (e.g. 'ls -la', 'echo hello').");
+                builder.required("command");
+            }
+            case "search_knowledge" -> {
+                builder.addStringProperty("query", "The search query to find relevant knowledge");
+                builder.required("query");
+            }
             case "query_uploaded_data" -> {
                 builder.addStringProperty("fileId",
                         "The fileId or original filename of the uploaded file.");
@@ -173,29 +125,24 @@ public class PromptOrchestrator {
     }
 
     private String buildToolDescription(ToolDefinition tool) {
-        String desc = switch (tool.getName()) {
+        return switch (tool.getName()) {
             case "database_query" ->
-                "Execute a SQL SELECT query on the SQLite database. Schema:\n" + databaseSchema
-                    + "Returns JSON rows.";
+                "Execute a SQL SELECT query on the database. Schema:\n" + databaseSchema
+                    + "\nParameters: {\"query\": \"SQL query string\"}";
             case "data_visualization" ->
-                "Generate an ECharts chart from REAL data. The 'data' parameter must be the ACTUAL JSON array returned by database_query — do not fabricate or modify values. Use double quotes not single quotes.";
+                "Generate an ECharts chart from REAL data. Parameters: {\"chartType\": \"bar|line|pie|scatter\", \"data\": \"JSON array of data objects\"}";
             case "file_export" ->
-                "Export data to a CSV file on the local filesystem. DESTRUCTIVE — requires human approval.";
+                "Export data to a CSV file. DESTRUCTIVE — requires human approval. Parameters: {\"data\": \"JSON array\", \"filename\": \"output.csv\"}";
             case "bash_execution" ->
-                "Execute an arbitrary bash command. DESTRUCTIVE — requires human approval.";
+                "Execute a bash command. DESTRUCTIVE — requires human approval. Parameters: {\"command\": \"shell command\"}";
             case "local_search" ->
                 "Search local files and directories for content.";
             case "query_uploaded_data" ->
-                "Query data from an uploaded file (CSV, XLSX, or PDF). Returns JSON rows in the same format as database_query. Output can be passed to data_visualization.";
+                "Query data from an uploaded file (CSV, XLSX, or PDF). Returns JSON rows. Parameters: {\"fileId\": \"file-id\"}";
+            case "search_knowledge" ->
+                "Search the knowledge base for information relevant to the user's query. Returns text chunks with relevance scores. Parameters: {\"query\": \"search query\"}";
             default ->
                 tool.getName() + " tool.";
         };
-        if (!tool.isConcurrencySafe()) {
-            desc += " Not concurrency-safe — executes in isolation.";
-        }
-        if (tool.isDestructive()) {
-            desc += " DESTRUCTIVE — may modify system state.";
-        }
-        return desc;
     }
 }

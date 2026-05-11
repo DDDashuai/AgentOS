@@ -10,6 +10,9 @@ import com.agentos.core.tool.ToolExecutionResult;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
+import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatLanguageModel;
 import dev.langchain4j.model.output.Response;
 import org.slf4j.Logger;
@@ -20,13 +23,19 @@ import reactor.core.publisher.Flux;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Core agent harness — an async streaming loop that drives the agent:
  * <pre>
- *   LLM call → parse tool calls → execute via ConcurrencyPartitioningEngine →
- *   append results to state → loop until final text
+ *   LLM call → parse text-based [TOOL_CALL] → execute tools →
+ *   append results → loop until no more tool calls → emit final
  * </pre>
+ * <p>
+ * Uses a text-based tool call format instead of native OpenAI function calling
+ * because the MLX server's Qwen2-7B model does not support structured tool calls.
+ * The format is: {@code [TOOL_CALL] {"name": "...", "arguments": {...}} [/TOOL_CALL]}
  */
 @Component
 public class AgentHarness {
@@ -35,6 +44,10 @@ public class AgentHarness {
 
     /** Safety limit: break agent loop after this many iterations to prevent runaway loops. */
     private static final int MAX_ITERATIONS = 10;
+
+    /** Regex to extract [TOOL_CALL] blocks from LLM text output. */
+    private static final Pattern TOOL_CALL_PATTERN =
+            Pattern.compile("\\[TOOL_CALL\\]\\s*(\\{.*?\\})\\s*\\[/TOOL_CALL\\]", Pattern.DOTALL);
 
     private final ChatLanguageModel chatModel;
     private final ConcurrencyPartitioningEngine partitioningEngine;
@@ -53,57 +66,149 @@ public class AgentHarness {
     }
 
     /**
+     * Build the initial message list for the first LLM call.
+     * Creates system message + conversation history + current user prompt.
+     */
+    private List<dev.langchain4j.data.message.ChatMessage> buildInitialMessages(
+            AgentState state, String userPrompt) {
+        List<dev.langchain4j.data.message.ChatMessage> messages = new ArrayList<>();
+        messages.add(new SystemMessage(promptOrchestrator.systemPrompt()));
+
+        for (ChatMessage msg : state.history()) {
+            addToMessages(messages, msg);
+        }
+
+        messages.add(new UserMessage(userPrompt));
+        return messages;
+    }
+
+    /**
+     * Append a tool turn to the message list — the assistant's tool call response + tool results.
+     */
+    private void appendToolTurn(
+            List<dev.langchain4j.data.message.ChatMessage> messages,
+            String toolCallText,
+            String aiResponsePrefix,
+            List<ToolExecutionResult> results) {
+        // Add assistant message with the tool call it made
+        String fullText = aiResponsePrefix != null && !aiResponsePrefix.isEmpty()
+                ? aiResponsePrefix + "\n" + toolCallText
+                : toolCallText;
+        messages.add(new AiMessage(fullText));
+
+        // Add tool results
+        for (ToolExecutionResult result : results) {
+            messages.add(new ToolExecutionResultMessage(
+                    result.toolCallId(), result.toolName(), result.output()));
+        }
+    }
+
+    private void addToMessages(
+            List<dev.langchain4j.data.message.ChatMessage> messages, ChatMessage msg) {
+        switch (msg.role()) {
+            case "user" -> messages.add(new UserMessage(msg.content()));
+            case "assistant" -> messages.add(new AiMessage(msg.content()));
+            case "tool" -> {
+                int colonIdx = msg.content().indexOf(':');
+                if (colonIdx > 0) {
+                    String toolName = msg.content().substring(0, colonIdx);
+                    String result = msg.content().substring(colonIdx + 1);
+                    String id = msg.toolCallId() != null ? msg.toolCallId() : "call_" + System.nanoTime();
+                    messages.add(new ToolExecutionResultMessage(id, toolName, result));
+                } else {
+                    messages.add(new ToolExecutionResultMessage("call_0", "unknown", msg.content()));
+                }
+            }
+            default -> log.warn("Unknown message role: {}", msg.role());
+        }
+    }
+
+    /**
+     * Parse [TOOL_CALL] blocks from the LLM's text response.
+     * Returns the list of parsed tool call requests, or empty list if none found.
+     */
+    private List<ParsedToolCall> parseToolCalls(String text) {
+        List<ParsedToolCall> calls = new ArrayList<>();
+        Matcher matcher = TOOL_CALL_PATTERN.matcher(text);
+        while (matcher.find()) {
+            String json = matcher.group(1).trim();
+            try {
+                Map<String, Object> parsed = objectMapper.readValue(json,
+                        new TypeReference<Map<String, Object>>() {});
+                String name = (String) parsed.get("name");
+                @SuppressWarnings("unchecked")
+                Map<String, String> args = parsed.get("arguments") instanceof Map<?, ?> m
+                        ? objectMapper.convertValue(m, new TypeReference<Map<String, String>>() {})
+                        : Map.of();
+                if (name != null && !name.isBlank()) {
+                    calls.add(new ParsedToolCall(name, args));
+                } else {
+                    log.warn("Tool call missing 'name' field: {}", json);
+                }
+            } catch (Exception e) {
+                log.warn("Failed to parse tool call JSON: {} — {}", json, e.getMessage());
+            }
+        }
+        return calls;
+    }
+
+    /**
      * Runs the agent loop for the given user prompt, streaming events as they
-     * happen. The caller determines terminal behaviour (subscribe, block, etc.).
+     * happen.
      */
     public Flux<AgentEvent> run(AgentState initialState, String userPrompt) {
         return Flux.create(emitter -> {
-            AgentState state = initialState.appendMessage(ChatMessage.user(userPrompt));
+            AgentState state = initialState;
             int iteration = 0;
+
+            // Build the initial message list
+            List<dev.langchain4j.data.message.ChatMessage> messages =
+                    buildInitialMessages(state, userPrompt);
 
             loop:
             while (iteration++ < MAX_ITERATIONS) {
-                // 1. Build messages and call LLM
+                // 1. Call LLM (no tool specifications — the prompt instructs the format)
                 emitter.next(new AgentEvent.ThinkingEvent("Sending to LLM..."));
-                List<dev.langchain4j.data.message.ChatMessage> messages =
-                        promptOrchestrator.buildMessages(state, userPrompt);
-
-                Response<AiMessage> response = chatModel.generate(
-                        messages, promptOrchestrator.toolSpecifications());
+                Response<AiMessage> response = chatModel.generate(messages);
                 AiMessage aiMessage = response.content();
+                String text = aiMessage.text() != null ? aiMessage.text() : "";
 
-                // 2. Check for tool calls
-                if (aiMessage.hasToolExecutionRequests()) {
-                    var lc4jRequests = aiMessage.toolExecutionRequests();
+                // 2. Parse text for [TOOL_CALL] blocks
+                List<ParsedToolCall> parsedCalls = parseToolCalls(text);
 
+                if (!parsedCalls.isEmpty()) {
                     emitter.next(new AgentEvent.ThinkingEvent(
-                            "Executing " + lc4jRequests.size() + " tool(s)..."));
+                            "Executing " + parsedCalls.size() + " tool(s)..."));
 
-                    // Map LangChain4j requests → our domain requests, preserving tool call IDs
+                    // Strip tool call blocks for the assistant message history
+                    String cleanText = text.replaceAll("\\s*\\[TOOL_CALL\\].*?\\[/TOOL_CALL\\]\\s*", " ").trim();
+
+                    // Map parsed calls → domain tool execution requests
                     List<ToolExecutionRequest> toolRequests = new ArrayList<>();
-                    for (var lc4jReq : lc4jRequests) {
-                        Map<String, String> args = parseArgs(lc4jReq.arguments());
+                    for (ParsedToolCall call : parsedCalls) {
                         toolRequests.add(new ToolExecutionRequest(
-                                lc4jReq.name(), args, lc4jReq.id(), state.sessionId()));
+                                call.name(), call.arguments(),
+                                "call_" + System.nanoTime(), state.sessionId()));
                     }
 
-                    // Execute via the partitioning engine (virtual-thread aware + security chain)
+                    // Execute via the partitioning engine
                     List<ToolExecutionResult> results =
                             partitioningEngine.executePartitioned(toolRequests);
 
                     // Emit tool execution events
                     emitter.next(new AgentEvent.ToolExecutionEvent(results));
 
-                    // Update state: append assistant message + tool results
-                    String assistantText = aiMessage.text() != null ? aiMessage.text() : "";
-                    state = state.appendMessage(ChatMessage.assistant(assistantText));
+                    // Append this tool turn to the message list
+                    appendToolTurn(messages, text, cleanText, results);
+
+                    // Update in-memory state
+                    state = state.appendMessage(ChatMessage.assistant(cleanText));
                     for (ToolExecutionResult result : results) {
                         state = state.appendMessage(
                                 ChatMessage.tool(result.toolName(), result.output(), result.toolCallId()));
                     }
                 } else {
-                    // 3. Final text response — no more tool calls
-                    String text = aiMessage.text() != null ? aiMessage.text() : "";
+                    // 3. No tool calls — this is the final text response
                     state = state.appendMessage(ChatMessage.assistant(text));
                     emitter.next(new AgentEvent.FinalResponseEvent(text));
                     break loop;
@@ -120,16 +225,6 @@ public class AgentHarness {
         });
     }
 
-    @SuppressWarnings("unchecked")
-    private Map<String, String> parseArgs(String json) {
-        if (json == null || json.isBlank()) {
-            return Map.of();
-        }
-        try {
-            return objectMapper.readValue(json, new TypeReference<Map<String, String>>() {});
-        } catch (Exception e) {
-            log.warn("Failed to parse tool arguments JSON: {}", json, e);
-            return Map.of();
-        }
-    }
+    /** Internal record for a parsed [TOOL_CALL] block. */
+    private record ParsedToolCall(String name, Map<String, String> arguments) {}
 }
