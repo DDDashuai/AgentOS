@@ -2,6 +2,7 @@ package com.agentos.core.llm;
 
 import com.agentos.core.state.AgentState;
 import com.agentos.core.state.ChatMessage;
+import com.agentos.core.file.FileStorageService;
 import com.agentos.core.tools.DatabaseSchemaProvider;
 import com.agentos.core.tool.ToolDefinition;
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -33,9 +34,12 @@ public class PromptOrchestrator {
     private final String systemPrompt;
     private final List<ToolSpecification> toolSpecifications;
     private final String databaseSchema;
+    private final FileStorageService fileStorageService;
 
-    public PromptOrchestrator(List<ToolDefinition> tools, DatabaseSchemaProvider schemaProvider) {
+    public PromptOrchestrator(List<ToolDefinition> tools, DatabaseSchemaProvider schemaProvider,
+                              FileStorageService fileStorageService) {
         this.databaseSchema = schemaProvider.getSchemaDescription();
+        this.fileStorageService = fileStorageService;
         this.toolSpecifications = tools.stream()
                 .map(this::toToolSpecification)
                 .toList();
@@ -87,8 +91,13 @@ public class PromptOrchestrator {
             }
         }
 
-        // 3. Current user prompt
-        messages.add(new UserMessage(userPrompt));
+        // 3. Uploaded file context — injected before the user prompt
+        String fileDesc = fileStorageService.buildDescription(state.sessionId());
+        String augmentedPrompt = fileDesc.isEmpty() ? userPrompt
+                : fileDesc + "\n[END OF UPLOADED FILE CONTEXT]\n---\n" + userPrompt;
+
+        // 4. Current user prompt (augmented with file context if any)
+        messages.add(new UserMessage(augmentedPrompt));
 
         return messages;
     }
@@ -118,9 +127,10 @@ public class PromptOrchestrator {
                 .append("1. Always use the EXACT table and column names from DATABASE SCHEMA above.\n")
                 .append("2. When you call database_query, it returns a JSON result. Use the EXACT data from that result — do not invent or change values.\n")
                 .append("3. To chain tools: call database_query first, wait for the result, then call data_visualization with the actual data from the query result.\n")
-                .append("4. The 'data' parameter of data_visualization must be the RAW JSON array of rows from database_query — do not summarize, change, or fabricate data.\n")
-                .append("5. Always output valid JSON: use double quotes (\") not single quotes (') for JSON strings.\n")
-                .append("6. When you have enough information, respond with your final answer.\n");
+                .append("4. The 'data' parameter of data_visualization must be the RAW JSON array of rows from database_query or query_uploaded_data — do not summarize, change, or fabricate data.\n")
+                .append("5. query_uploaded_data returns data in the same JSON format as database_query, and its output can also be passed to data_visualization.\n")
+                .append("6. Always output valid JSON: use double quotes (\") not single quotes (') for JSON strings.\n")
+                .append("7. When you have enough information, respond with your final answer.\n");
         return sb.toString();
     }
 
@@ -151,6 +161,11 @@ public class PromptOrchestrator {
                 builder.addStringProperty("filename", "Output filename (e.g. report.csv)");
                 builder.required("data", "filename");
             }
+            case "query_uploaded_data" -> {
+                builder.addStringProperty("fileId",
+                        "The fileId or original filename of the uploaded file.");
+                builder.required("fileId");
+            }
             default -> {}
         }
 
@@ -170,6 +185,8 @@ public class PromptOrchestrator {
                 "Execute an arbitrary bash command. DESTRUCTIVE — requires human approval.";
             case "local_search" ->
                 "Search local files and directories for content.";
+            case "query_uploaded_data" ->
+                "Query data from an uploaded file (CSV, XLSX, or PDF). Returns JSON rows in the same format as database_query. Output can be passed to data_visualization.";
             default ->
                 tool.getName() + " tool.";
         };
