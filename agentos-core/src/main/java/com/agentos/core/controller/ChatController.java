@@ -70,20 +70,23 @@ public class ChatController {
             return sessionRepository.save(s);
         });
 
-        // Persist user message
-        messageRepository.save(new ChatMessageEntity(
-                UUID.randomUUID(), sessionUuid, "user", message, null));
-
-        // Get or create agent execution state (loads previous messages from DB on restart)
+        // Get or create agent execution state (loads messages from DB — the
+        // current user message is added by AgentHarness before the LLM call)
         AgentState state = sessions.computeIfAbsent(sessionId,
                 id -> buildAgentState(sessionId));
 
         log.info("[{}] Chat request: {}", sessionId, message);
 
         final String finalSessionId = sessionId;
+        final UUID finalSessionUuid = sessionUuid;
         return agentHarness.run(state, message)
                 .concatMap(event -> Flux.fromIterable(toSseEvents(event, finalSessionId)))
-                .doFinally(sig -> log.debug("[{}] Stream complete: {}", finalSessionId, sig));
+                .doFinally(sig -> {
+                    // Persist user message after the stream completes
+                    messageRepository.save(new ChatMessageEntity(
+                            UUID.randomUUID(), finalSessionUuid, "user", message, null));
+                    log.debug("[{}] Stream complete: {}", finalSessionId, sig);
+                });
     }
 
     /**
@@ -185,10 +188,14 @@ public class ChatController {
             } else {
                 node.putPOJO("payload", data);
             }
-            return "data: " + objectMapper.writeValueAsString(node) + "\n\n";
+            // Spring WebFlux adds "data:" prefix and "\n\n" suffix automatically
+            // when produces=TEXT_EVENT_STREAM_VALUE. Add a leading space so the
+            // output is "data: {...}" (SSE spec allows both forms; space matches
+            // what the frontend EventSource parser expects).
+            return " " + objectMapper.writeValueAsString(node);
         } catch (Exception e) {
             log.error("Failed to serialize SSE event", e);
-            return "data: {\"type\":\"error\",\"message\":\"serialization failed\"}\n\n";
+            return "{\"type\":\"error\",\"message\":\"serialization failed\"}";
         }
     }
 

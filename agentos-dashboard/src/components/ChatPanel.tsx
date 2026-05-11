@@ -1,20 +1,21 @@
 import { useState, useRef, useEffect } from 'react';
-import type { Message } from '../hooks/useAgentConversation';
-import { Send, Terminal, User } from 'lucide-react';
+import type { Message, StatusEvent } from '../hooks/useAgentConversation';
+import { Send, Terminal, User, Loader2, CheckCircle2, XCircle } from 'lucide-react';
 
 interface ChatPanelProps {
   messages: Message[];
+  statusEvents: StatusEvent[];
   onSend: (text: string) => void;
   isProcessing: boolean;
 }
 
-export function ChatPanel({ messages, onSend, isProcessing }: ChatPanelProps) {
+export function ChatPanel({ messages, statusEvents, onSend, isProcessing }: ChatPanelProps) {
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, statusEvents]);
 
   const handleSend = () => {
     if (input.trim() && !isProcessing) {
@@ -84,6 +85,51 @@ export function ChatPanel({ messages, onSend, isProcessing }: ChatPanelProps) {
             </div>
           </div>
         ))}
+
+        {/* Intermediate status events (thinking, tool calls) */}
+        {statusEvents.map((evt) => (
+          <div key={evt.id} className="flex justify-start">
+            {evt.type === 'thinking' ? (
+              <div className="bg-panel-light border border-border rounded-lg px-3 py-2 text-sm max-w-[90%]">
+                <div className="flex items-center gap-2">
+                  <Loader2 className="w-3 h-3 text-cyan animate-spin shrink-0" />
+                  <span className="text-xs text-text-dim">{evt.label}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="bg-panel-light border border-border rounded-lg px-3 py-2 text-sm max-w-[90%]">
+                <div className="flex items-center gap-1.5 mb-1">
+                  <Terminal className="w-3 h-3 text-cyan" />
+                  <span className="text-[10px] font-medium uppercase tracking-wider text-text-dim">
+                    Tool: {evt.label}
+                  </span>
+                  {evt.results?.[0]?.success !== false && (
+                    <CheckCircle2 className="w-3 h-3 text-accent" />
+                  )}
+                  {evt.results?.[0]?.success === false && (
+                    <XCircle className="w-3 h-3 text-error" />
+                  )}
+                </div>
+                {evt.detail && (
+                  <p className="text-[10px] text-text-dim leading-relaxed">{evt.detail}</p>
+                )}
+                {evt.results && evt.results.length > 0 && (
+                  <div className="mt-1 space-y-1">
+                    {evt.results.map((r, i) => (
+                      <div key={i} className="text-[11px] text-text-dim">
+                        <span className={r.success ? 'text-accent' : 'text-error'}>
+                          {r.success ? '✓' : '✗'}
+                        </span>{' '}
+                        {r.toolName} — {r.durationMs}ms
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))}
+
         <div ref={messagesEndRef} />
       </div>
 

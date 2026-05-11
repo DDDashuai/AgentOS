@@ -9,6 +9,7 @@ import { ThumbsUp, ThumbsDown } from 'lucide-react';
 function App() {
   const {
     messages,
+    statusEvents,
     pipelineStage,
     pipelineMessage,
     chartOption,
@@ -28,6 +29,7 @@ function App() {
       <div className="w-[380px] min-w-[380px] h-full flex-shrink-0 flex flex-col">
         <ChatPanel
           messages={messages}
+          statusEvents={statusEvents}
           onSend={sendMessage}
           isProcessing={isProcessing}
         />

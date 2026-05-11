@@ -22,8 +22,18 @@ export interface Message {
   content: string;
 }
 
+/** An intermediate event shown as a status line in the chat (thinking, tool call). */
+export interface StatusEvent {
+  id: string;
+  type: 'thinking' | 'tool_result';
+  label: string;
+  detail?: string;
+  results?: ToolResult[];
+}
+
 export function useAgentConversation() {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [statusEvents, setStatusEvents] = useState<StatusEvent[]>([]);
   const [pipelineStage, setPipelineStage] = useState<PipelineStage>('idle');
   const [pipelineMessage, setPipelineMessage] = useState('');
   const [chartOption, setChartOption] = useState<Record<string, unknown> | null>(null);
@@ -35,8 +45,14 @@ export function useAgentConversation() {
   const sessionIdRef = useRef<string | null>(null);
   const isProcessingRef = useRef(false);
   const pendingToolRef = useRef<string | null>(null);
+  const statusIdCounter = useRef(0);
 
   useEffect(() => { pendingToolRef.current = pendingTool; }, [pendingTool]);
+
+  const addStatusEvent = useCallback((type: StatusEvent['type'], label: string, detail?: string, results?: ToolResult[]) => {
+    const id = `status-${++statusIdCounter.current}`;
+    setStatusEvents((prev) => [...prev, { id, type, label, detail, results }]);
+  }, []);
 
   const sendMessage = useCallback(async (text: string) => {
     if (!text.trim() || isProcessingRef.current) return;
@@ -46,6 +62,7 @@ export function useAgentConversation() {
     setChartOption(null);
     setPipelineStage('validation');
     setPipelineMessage('Sending request...');
+    setStatusEvents([]);
 
     const userMsg: Message = {
       id: crypto.randomUUID(),
@@ -81,21 +98,28 @@ export function useAgentConversation() {
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
+        // Split on double newline (SSE event boundary)
         const parts = buffer.split('\n\n');
         buffer = parts.pop() ?? '';
 
         for (const part of parts) {
+          // Find the line starting with "data:" (handle both "data:{...}" and "data: {...}")
           const dataLine = part
             .split('\n')
-            .find((l) => l.startsWith('data: '));
+            .find((l) => l.startsWith('data:'));
           if (!dataLine) continue;
 
-          const json = JSON.parse(dataLine.slice(6));
+          // Strip "data:" prefix and leading whitespace
+          const raw = dataLine.slice(5).trim();
+          if (!raw) continue;
+
+          const json = JSON.parse(raw);
 
           switch (json.type) {
             case 'thinking': {
               setPipelineStage('validation');
               setPipelineMessage(json.thought as string);
+              addStatusEvent('thinking', json.thought as string);
               break;
             }
             case 'tool_execution': {
@@ -104,6 +128,8 @@ export function useAgentConversation() {
               const results = json.results as ToolResult[] | undefined;
               if (results) {
                 for (const r of results) {
+                  addStatusEvent('tool_result', r.toolName, `(success=${r.success}, ${r.durationMs}ms)`, results);
+                  // Check for chart visualization output
                   if (
                     r.toolName === 'data_visualization' &&
                     r.success &&
@@ -165,7 +191,7 @@ export function useAgentConversation() {
       setIsProcessing(false);
       abortRef.current = null;
     }
-  }, []);
+  }, [addStatusEvent]);
 
   const approve = useCallback(async () => {
     const tool = pendingToolRef.current;
@@ -196,6 +222,7 @@ export function useAgentConversation() {
     setChartOption(null);
     isProcessingRef.current = false;
     setIsProcessing(false);
+    setStatusEvents([]);
 
     setMessages((prev) => [
       ...prev,
@@ -209,6 +236,7 @@ export function useAgentConversation() {
 
   return {
     messages,
+    statusEvents,
     pipelineStage,
     pipelineMessage,
     chartOption,
