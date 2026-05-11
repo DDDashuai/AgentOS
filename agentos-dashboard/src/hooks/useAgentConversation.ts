@@ -217,5 +217,6 @@ export function useAgentConversation() {
     sendMessage,
     approve,
     deny,
+    sessionIdRef,
   } as const;
 }

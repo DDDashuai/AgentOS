@@ -1,7 +1,9 @@
 import { useAgentConversation } from './hooks/useAgentConversation';
+import { useFileUpload } from './hooks/useFileUpload';
 import { ChatPanel } from './components/ChatPanel';
 import { PipelineMonitor } from './components/PipelineMonitor';
 import { DataVizPanel } from './components/DataVizPanel';
+import { FileUploadPanel } from './components/FileUploadPanel';
 import { ThumbsUp, ThumbsDown } from 'lucide-react';
 
 function App() {
@@ -15,16 +17,27 @@ function App() {
     sendMessage,
     approve,
     deny,
+    sessionIdRef,
   } = useAgentConversation();
+
+  const fileUpload = useFileUpload(sessionIdRef);
 
   return (
     <div className="h-screen w-screen flex bg-surface overflow-hidden">
-      {/* Sidebar - Chat */}
-      <div className="w-[380px] min-w-[380px] h-full flex-shrink-0">
+      {/* Sidebar - Chat + File Upload */}
+      <div className="w-[380px] min-w-[380px] h-full flex-shrink-0 flex flex-col">
         <ChatPanel
           messages={messages}
           onSend={sendMessage}
           isProcessing={isProcessing}
+        />
+        <FileUploadPanel
+          files={fileUpload.files}
+          isUploading={fileUpload.isUploading}
+          error={fileUpload.error}
+          onUpload={fileUpload.uploadFile}
+          onRemoveFile={fileUpload.removeFile}
+          onClearError={fileUpload.clearError}
         />
       </div>
 
@@ -40,12 +53,10 @@ function App() {
 
         {/* Bottom: Data Viz + Approval */}
         <div className="flex-1 flex flex-col gap-4 min-h-0">
-          {/* Chart */}
           <div className="flex-1 min-h-0">
             <DataVizPanel chartOption={chartOption} />
           </div>
 
-          {/* Approval Controls */}
           {showApproval && (
             <div className="animate-slide-in bg-warn/5 border border-warn/30 rounded-lg p-4 flex-shrink-0">
               <div className="flex items-center justify-between gap-4">
