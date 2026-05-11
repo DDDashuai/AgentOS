@@ -7,18 +7,37 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
+import javax.sql.DataSource;
+import java.io.PrintWriter;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
-import java.sql.Statement;
+import java.sql.SQLException;
+import java.sql.SQLFeatureNotSupportedException;
 import java.util.Map;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class McpToolIntegrationTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** A simple DataSource that creates a new SQLite connection each time. */
+    private static DataSource sqliteDataSource(String url) {
+        return new DataSource() {
+            @Override public Connection getConnection() throws SQLException { return DriverManager.getConnection(url); }
+            @Override public Connection getConnection(String username, String password) { throw new UnsupportedOperationException(); }
+            @Override public PrintWriter getLogWriter() { return null; }
+            @Override public void setLogWriter(PrintWriter out) {}
+            @Override public void setLoginTimeout(int seconds) {}
+            @Override public int getLoginTimeout() { return 0; }
+            @Override public Logger getParentLogger() throws SQLFeatureNotSupportedException { throw new SQLFeatureNotSupportedException(); }
+            @Override public <T> T unwrap(Class<T> iface) { return null; }
+            @Override public boolean isWrapperFor(Class<?> iface) { return false; }
+        };
+    }
 
     // ---- DatabaseQueryTool tests ----
 
@@ -28,14 +47,14 @@ class McpToolIntegrationTest {
         String dbUrl = "jdbc:sqlite:" + dbFile.toAbsolutePath();
 
         try (Connection conn = DriverManager.getConnection(dbUrl);
-             Statement stmt = conn.createStatement()) {
+             var stmt = conn.createStatement()) {
             stmt.execute("CREATE TABLE users (id INTEGER, name TEXT, age INTEGER)");
             stmt.execute("INSERT INTO users VALUES (1, 'Alice', 30)");
             stmt.execute("INSERT INTO users VALUES (2, 'Bob', 25)");
             stmt.execute("INSERT INTO users VALUES (3, 'Charlie', 35)");
         }
 
-        DatabaseQueryTool tool = new DatabaseQueryTool(MAPPER, dbUrl);
+        DatabaseQueryTool tool = new DatabaseQueryTool(MAPPER, sqliteDataSource(dbUrl));
         ToolExecutionResult result = tool.execute(
                 new ToolExecutionRequest("database_query", Map.of("query", "SELECT * FROM users ORDER BY id"), null));
 
@@ -48,7 +67,7 @@ class McpToolIntegrationTest {
 
     @Test
     void databaseQueryTool_RejectsNonSelect() {
-        DatabaseQueryTool tool = new DatabaseQueryTool(MAPPER, "jdbc:sqlite::memory:");
+        DatabaseQueryTool tool = new DatabaseQueryTool(MAPPER, sqliteDataSource("jdbc:sqlite::memory:"));
         ToolExecutionResult result = tool.execute(
                 new ToolExecutionRequest("database_query", Map.of("query", "DROP TABLE users"), null));
 
@@ -59,7 +78,7 @@ class McpToolIntegrationTest {
     @Test
     void databaseQueryTool_ReturnsErrorForInvalidSql(@TempDir Path tempDir) {
         DatabaseQueryTool tool = new DatabaseQueryTool(MAPPER,
-                "jdbc:sqlite:" + tempDir.resolve("empty.db").toAbsolutePath());
+                sqliteDataSource("jdbc:sqlite:" + tempDir.resolve("empty.db").toAbsolutePath()));
         ToolExecutionResult result = tool.execute(
                 new ToolExecutionRequest("database_query", Map.of("query", "SELECT * FROM nonexistent"), null));
 
@@ -69,7 +88,7 @@ class McpToolIntegrationTest {
 
     @Test
     void databaseQueryTool_MissingQueryArg() {
-        DatabaseQueryTool tool = new DatabaseQueryTool(MAPPER, "jdbc:sqlite::memory:");
+        DatabaseQueryTool tool = new DatabaseQueryTool(MAPPER, sqliteDataSource("jdbc:sqlite::memory:"));
         ToolExecutionResult result = tool.execute(
                 new ToolExecutionRequest("database_query", Map.of(), null));
 
@@ -173,7 +192,7 @@ class McpToolIntegrationTest {
 
     @Test
     void fileExportTool_DestructiveFlag() {
-        DatabaseQueryTool dbTool = new DatabaseQueryTool(MAPPER, "jdbc:sqlite::memory:");
+        DatabaseQueryTool dbTool = new DatabaseQueryTool(MAPPER, sqliteDataSource("jdbc:sqlite::memory:"));
         FileExportTool fileTool = new FileExportTool(MAPPER);
 
         assertFalse(dbTool.isDestructive());

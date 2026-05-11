@@ -1,5 +1,6 @@
 package com.agentos.core.engine;
 
+import com.agentos.core.repository.ToolApprovalRepository;
 import com.agentos.core.security.HumanApprovalInterceptor;
 import com.agentos.core.security.PendingApprovalException;
 import com.agentos.core.security.ToolInterceptor;
@@ -18,6 +19,10 @@ import java.util.concurrent.Executors;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
+/**
+ * Unit tests for ConcurrencyPartitioningEngine.
+ * Uses mocked repositories for ApprovalService to avoid DB dependencies.
+ */
 class ConcurrencyPartitioningEngineTest {
 
     private ToolDefinition safeTool;
@@ -203,7 +208,8 @@ class ConcurrencyPartitioningEngineTest {
         when(destructive.getName()).thenReturn("rm_tool");
         when(destructive.isDestructive()).thenReturn(true);
 
-        ToolInterceptor approval = new HumanApprovalInterceptor(List.of(destructive), new ApprovalService());
+        ToolInterceptor approval = new HumanApprovalInterceptor(List.of(destructive),
+                new ApprovalService(mock(ToolApprovalRepository.class)));
 
         assertThrows(PendingApprovalException.class,
                 () -> approval.preHandle(new ToolExecutionRequest("rm_tool", Map.of(), null)));
@@ -215,7 +221,8 @@ class ConcurrencyPartitioningEngineTest {
         when(safe.getName()).thenReturn("search_tool");
         when(safe.isDestructive()).thenReturn(false);
 
-        ToolInterceptor approval = new HumanApprovalInterceptor(List.of(safe), new ApprovalService());
+        ToolInterceptor approval = new HumanApprovalInterceptor(List.of(safe),
+                new ApprovalService(mock(ToolApprovalRepository.class)));
 
         assertDoesNotThrow(
                 () -> approval.preHandle(new ToolExecutionRequest("search_tool", Map.of(), null)));
@@ -239,7 +246,8 @@ class ConcurrencyPartitioningEngineTest {
     void engineWithHumanApprovalInterceptor_BlocksDestructiveTool() {
         var engineWithApproval = new ConcurrencyPartitioningEngine(
                 List.of(destructiveTool), Executors.newSingleThreadExecutor(),
-                List.of(new HumanApprovalInterceptor(List.of(destructiveTool), new ApprovalService())));
+                List.of(new HumanApprovalInterceptor(List.of(destructiveTool),
+                        new ApprovalService(mock(ToolApprovalRepository.class)))));
 
         List<ToolExecutionResult> results = engineWithApproval.executePartitioned(List.of(
                 new ToolExecutionRequest("destructive_tool", Map.of(), "call_2")));
