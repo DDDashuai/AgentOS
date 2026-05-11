@@ -1,8 +1,10 @@
 # Claude Code personal config
 .claude/
+tmp/
 
 # Java/Spring Boot
 target/
+uploads/
 !.mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/
